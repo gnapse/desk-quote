@@ -1,10 +1,13 @@
 import AppKit
 import ServiceManagement
+import SwiftUI
 
-// MARK: - Settings
+// MARK: - Stored preferences
 
-enum Position: String, CaseIterable {
+enum Position: String, CaseIterable, Identifiable {
     case top, center, bottom
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
 }
 
 enum Prefs {
@@ -19,10 +22,8 @@ enum Prefs {
         get {
             let stored = defaults.double(forKey: "fontSize")
             let size = stored > 0 ? CGFloat(stored) : 48
-            if let name = defaults.string(forKey: "fontName"), let font = NSFont(name: name, size: size) {
-                return font
-            }
-            return NSFont.systemFont(ofSize: size, weight: .light)
+            let name = defaults.string(forKey: "fontName") ?? "HelveticaNeue-Light"
+            return NSFont(name: name, size: size) ?? NSFont.systemFont(ofSize: size, weight: .light)
         }
         set {
             defaults.set(newValue.fontName, forKey: "fontName")
@@ -39,7 +40,8 @@ enum Prefs {
             return NSColor.white.withAlphaComponent(0.85)
         }
         set {
-            if let data = try? NSKeyedArchiver.archivedData(withRootObject: newValue, requiringSecureCoding: true) {
+            let plain = newValue.usingColorSpace(.sRGB) ?? newValue
+            if let data = try? NSKeyedArchiver.archivedData(withRootObject: plain, requiringSecureCoding: true) {
                 defaults.set(data, forKey: "color")
             }
         }
@@ -129,191 +131,178 @@ final class Overlay {
     }
 }
 
-// MARK: - Text editor window
+// MARK: - Settings model
 
-final class Editor: NSObject, NSTextViewDelegate {
-    private let window: NSWindow
-    private let textView: NSTextView
-    private let onChange: (String) -> Void
+struct FontStyle: Hashable, Identifiable {
+    let postScriptName: String
+    let styleName: String
+    var id: String { postScriptName }
+}
 
-    init(onChange: @escaping (String) -> Void) {
-        self.onChange = onChange
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 260),
-            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false
-        )
-        window.title = "Desk Quote"
-        window.isReleasedWhenClosed = false
+final class SettingsModel: ObservableObject {
+    /// Called after any change, so the overlay can redraw.
+    var onChange: () -> Void = {}
 
-        let scroll = NSTextView.scrollableTextView()
-        textView = scroll.documentView as! NSTextView
-        super.init()
+    let families: [String] = NSFontManager.shared.availableFontFamilies
 
-        textView.font = .systemFont(ofSize: 15)
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.delegate = self
+    @Published var text: String { didSet { Prefs.text = text; onChange() } }
+    @Published var family: String { didSet { familyChanged() } }
+    @Published var fontName: String { didSet { saveFont() } }
+    @Published var size: Double { didSet { saveFont() } }
+    @Published var color: Color { didSet { Prefs.color = NSColor(color); onChange() } }
+    @Published var position: Position { didSet { Prefs.position = position; onChange() } }
+    @Published var shadow: Bool { didSet { Prefs.shadow = shadow; onChange() } }
+    @Published private(set) var openAtLogin = SMAppService.mainApp.status == .enabled
 
-        let done = NSButton(title: "Done", target: self, action: #selector(close))
-        done.keyEquivalent = "\r"
-        done.keyEquivalentModifierMask = .command
-        let hint = NSTextField(labelWithString: "Changes show on the desktop as you type. ⌘↩ to close.")
-        hint.textColor = .secondaryLabelColor
-        hint.font = .systemFont(ofSize: 11)
+    init() {
+        let font = Prefs.font
+        text = Prefs.text
+        family = font.familyName ?? "Helvetica Neue"
+        fontName = font.fontName
+        size = Double(font.pointSize)
+        color = Color(nsColor: Prefs.color)
+        position = Prefs.position
+        shadow = Prefs.shadow
+    }
 
-        let content = NSView()
-        for view in [scroll, done, hint] as [NSView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(view)
+    var styles: [FontStyle] {
+        (NSFontManager.shared.availableMembers(ofFontFamily: family) ?? []).compactMap { member in
+            guard let name = member[0] as? String, let style = member[1] as? String else { return nil }
+            return FontStyle(postScriptName: name, styleName: style)
         }
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
-            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            done.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 12),
-            done.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
-            done.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
-            hint.centerYAnchor.constraint(equalTo: done.centerYAnchor),
-            hint.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
-        ])
-        window.contentView = content
     }
 
-    func show() {
-        textView.string = Prefs.text
-        NSApp.activate(ignoringOtherApps: true)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(textView)
+    /// Keep the same style name ("Light", "Bold") when the family changes, if the new family has it.
+    private func familyChanged() {
+        let currentStyle = NSFont(name: fontName, size: 12)?.fontDescriptor.object(forKey: .face) as? String
+        let options = styles
+        let match = options.first { $0.styleName == currentStyle }
+            ?? options.first { $0.styleName == "Regular" }
+            ?? options.first
+        if let match, match.postScriptName != fontName {
+            fontName = match.postScriptName
+        }
     }
 
-    func textDidChange(_ notification: Notification) {
-        onChange(textView.string)
+    private func saveFont() {
+        if let font = NSFont(name: fontName, size: CGFloat(size)) {
+            Prefs.font = font
+        }
+        onChange()
     }
 
-    @objc private func close() {
-        window.close()
+    func setOpenAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+        openAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+// MARK: - Settings window
+
+struct SettingsView: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Form {
+            Section("Text") {
+                TextEditor(text: $model.text)
+                    .font(.system(size: 14))
+                    .frame(minHeight: 90)
+                    .scrollContentBackground(.hidden)
+            }
+
+            Section("Font") {
+                Picker("Family", selection: $model.family) {
+                    ForEach(model.families, id: \.self) { Text($0).tag($0) }
+                }
+                Picker("Style", selection: $model.fontName) {
+                    ForEach(model.styles) { Text($0.styleName).tag($0.postScriptName) }
+                }
+                LabeledContent("Size") {
+                    HStack {
+                        Slider(value: $model.size, in: 12...160, step: 1)
+                        Text("\(Int(model.size)) pt")
+                            .monospacedDigit()
+                            .frame(width: 48, alignment: .trailing)
+                    }
+                }
+                ColorPicker("Color", selection: $model.color, supportsOpacity: true)
+            }
+
+            Section("Layout") {
+                Picker("Position", selection: $model.position) {
+                    ForEach(Position.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Text shadow", isOn: $model.shadow)
+            }
+
+            Section("General") {
+                Toggle("Open at login", isOn: Binding(
+                    get: { model.openAtLogin },
+                    set: { model.setOpenAtLogin($0) }
+                ))
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
 // MARK: - App and menu bar item
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlay: Overlay!
-    private var editor: Editor!
+    private var model: SettingsModel!
+    private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem!
-    private let menu = NSMenu()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         overlay = Overlay()
-        editor = Editor { [weak self] text in
-            Prefs.text = text
-            self?.overlay.refresh()
-        }
+        model = SettingsModel()
+        model.onChange = { [weak self] in self?.overlay.refresh() }
         installEditMenu()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "text.quote", accessibilityDescription: "Desk Quote")
-        menu.delegate = self
+        let menu = NSMenu()
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit Desk Quote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        menu.addItem(item("Edit Text…", #selector(editText), "e"))
-        menu.addItem(item("Font…", #selector(showFonts), "t"))
-        menu.addItem(item("Color…", #selector(showColors), "c"))
+    // Opening the app again while it runs (Finder, Spotlight, `open`) shows the settings.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return false
+    }
 
-        let positionMenu = NSMenu()
-        for position in Position.allCases {
-            let entry = item(position.rawValue.capitalized, #selector(setPosition(_:)))
-            entry.representedObject = position.rawValue
-            entry.state = Prefs.position == position ? .on : .off
-            positionMenu.addItem(entry)
+    @objc private func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(model: model)))
+            window.title = "Desk Quote"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
         }
-        let positionItem = NSMenuItem(title: "Position", action: nil, keyEquivalent: "")
-        positionItem.submenu = positionMenu
-        menu.addItem(positionItem)
-
-        let shadow = item("Text Shadow", #selector(toggleShadow))
-        shadow.state = Prefs.shadow ? .on : .off
-        menu.addItem(shadow)
-
-        menu.addItem(.separator())
-        let login = item("Open at Login", #selector(toggleLogin))
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
-        menu.addItem(.separator())
-        menu.addItem(item("Quit Desk Quote", #selector(NSApplication.terminate(_:)), "q", target: NSApp))
-    }
-
-    private func item(_ title: String, _ action: Selector, _ key: String = "", target: AnyObject? = nil) -> NSMenuItem {
-        let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        entry.target = target ?? self
-        return entry
-    }
-
-    @objc private func editText() {
-        editor.show()
-    }
-
-    @objc private func showFonts() {
-        let manager = NSFontManager.shared
-        manager.target = self
-        manager.setSelectedFont(Prefs.font, isMultiple: false)
         NSApp.activate(ignoringOtherApps: true)
-        manager.orderFrontFontPanel(nil)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    // Sent by the font panel.
-    @objc func changeFont(_ sender: Any?) {
-        guard let manager = sender as? NSFontManager else { return }
-        Prefs.font = manager.convert(Prefs.font)
-        overlay.refresh()
-    }
-
-    @objc private func showColors() {
-        let panel = NSColorPanel.shared
-        panel.showsAlpha = true
-        panel.isContinuous = true
-        panel.color = Prefs.color
-        panel.setTarget(self)
-        panel.setAction(#selector(colorChanged(_:)))
-        NSApp.activate(ignoringOtherApps: true)
-        panel.orderFront(nil)
-    }
-
-    @objc private func colorChanged(_ sender: NSColorPanel) {
-        Prefs.color = sender.color
-        overlay.refresh()
-    }
-
-    @objc private func setPosition(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let position = Position(rawValue: raw) else { return }
-        Prefs.position = position
-        overlay.refresh()
-    }
-
-    @objc private func toggleShadow() {
-        Prefs.shadow.toggle()
-        overlay.refresh()
-    }
-
-    @objc private func toggleLogin() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            NSApp.activate(ignoringOtherApps: true)
-            NSAlert(error: error).runModal()
-        }
-    }
-
-    // Menu-bar-only apps have no Edit menu, so ⌘C/⌘V/⌘Z would not work in the editor without this.
+    // Menu-bar-only apps have no Edit menu, so ⌘C/⌘V/⌘Z would not work in text fields without this.
     private func installEditMenu() {
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")

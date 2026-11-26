@@ -36,13 +36,14 @@ The script builds `DeskQuote.app`, copies it to `~/Applications`, and opens it.
 
 ## Use
 
-Click the quote icon in the menu bar:
+Click the quote icon in the menu bar and choose **Settings…** (⌘,). Opening the app again from Spotlight or Finder also shows the settings.
 
-- **Edit Text…**: type your text. The desktop updates as you type.
-- **Font…** and **Color…**: change the look. Changes apply live.
-- **Position**: top, center or bottom.
-- **Text Shadow**: turn the shadow on or off.
-- **Open at Login**: start Desk Quote when you log in.
+All options are in one window, and changes apply to the desktop right away:
+
+- **Text**: multi-line.
+- **Font**: family, style, size and color, including opacity.
+- **Layout**: top, center or bottom position, and an optional text shadow.
+- **General**: open at login.
 
 ## How it works
 
