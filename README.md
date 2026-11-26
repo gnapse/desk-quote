@@ -13,7 +13,7 @@ Desk Quote is not a widget. macOS widgets always draw their own background, and 
 - Clicks pass through it.
 - Shows on every Space.
 - Any macOS font, size and color, including opacity.
-- Top, center or bottom position.
+- Nine positions, from top left to bottom right, with matching or custom text alignment.
 - Optional soft shadow, so the text stays readable on light wallpapers.
 - Can open at login.
 
@@ -42,7 +42,7 @@ All options are in one window, and changes apply to the desktop right away:
 
 - **Text**: multi-line.
 - **Font**: family, style, size and color, including opacity.
-- **Layout**: top, center or bottom position, and an optional text shadow.
+- **Layout**: nine positions in a 3×3 grid, text alignment (auto, left, center or right), and an optional text shadow. Auto alignment follows the position.
 - **General**: open at login.
 
 ## How it works

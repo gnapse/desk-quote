@@ -4,10 +4,60 @@ import SwiftUI
 
 // MARK: - Stored preferences
 
-enum Position: String, CaseIterable, Identifiable {
-    case top, center, bottom
+enum Vertical: String, CaseIterable { case top, middle, bottom }
+enum Horizontal: String, CaseIterable { case left, center, right }
+
+/// One of nine spots on the screen, such as "top-left" or "middle-center".
+struct Position: Hashable {
+    var vertical: Vertical
+    var horizontal: Horizontal
+
+    var rawValue: String { "\(vertical.rawValue)-\(horizontal.rawValue)" }
+
+    var title: String {
+        if vertical == .middle && horizontal == .center { return "Center" }
+        return "\(vertical.rawValue.capitalized) \(horizontal.rawValue)"
+    }
+
+    init(_ vertical: Vertical, _ horizontal: Horizontal) {
+        self.vertical = vertical
+        self.horizontal = horizontal
+    }
+
+    init?(rawValue: String) {
+        // Values saved by older versions, which only had three positions.
+        switch rawValue {
+        case "top": self.init(.top, .center); return
+        case "center": self.init(.middle, .center); return
+        case "bottom": self.init(.bottom, .center); return
+        default: break
+        }
+        let parts = rawValue.split(separator: "-").map(String.init)
+        guard parts.count == 2,
+              let vertical = Vertical(rawValue: parts[0]),
+              let horizontal = Horizontal(rawValue: parts[1]) else { return nil }
+        self.init(vertical, horizontal)
+    }
+}
+
+enum TextAlign: String, CaseIterable, Identifiable {
+    case auto, left, center, right
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+
+    /// Auto follows the position: text on the left edge aligns left, and so on.
+    func resolved(for position: Position) -> NSTextAlignment {
+        switch self {
+        case .left: return .left
+        case .center: return .center
+        case .right: return .right
+        case .auto:
+            switch position.horizontal {
+            case .left: return .left
+            case .center: return .center
+            case .right: return .right
+            }
+        }
+    }
 }
 
 enum Prefs {
@@ -48,8 +98,13 @@ enum Prefs {
     }
 
     static var position: Position {
-        get { Position(rawValue: defaults.string(forKey: "position") ?? "") ?? .center }
+        get { Position(rawValue: defaults.string(forKey: "position") ?? "") ?? Position(.middle, .center) }
         set { defaults.set(newValue.rawValue, forKey: "position") }
+    }
+
+    static var alignment: TextAlign {
+        get { TextAlign(rawValue: defaults.string(forKey: "alignment") ?? "") ?? .auto }
+        set { defaults.set(newValue.rawValue, forKey: "alignment") }
     }
 
     static var shadow: Bool {
@@ -64,6 +119,7 @@ final class Overlay {
     private let window: NSWindow
     private let label = NSTextField(wrappingLabelWithString: "")
     private var verticalConstraint: NSLayoutConstraint?
+    private var horizontalConstraint: NSLayoutConstraint?
 
     init() {
         window = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
@@ -84,10 +140,7 @@ final class Overlay {
         label.isBordered = false
         label.drawsBackground = false
         content.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            label.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, multiplier: 0.7),
-        ])
+        label.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, multiplier: 0.7).isActive = true
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -103,8 +156,9 @@ final class Overlay {
         let frame = screen.visibleFrame
         window.setFrame(frame, display: true)
 
+        let position = Prefs.position
         let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
+        paragraph.alignment = Prefs.alignment.resolved(for: position)
         var attributes: [NSAttributedString.Key: Any] = [
             .font: Prefs.font,
             .foregroundColor: Prefs.color,
@@ -121,13 +175,20 @@ final class Overlay {
         label.preferredMaxLayoutWidth = frame.width * 0.7
 
         verticalConstraint?.isActive = false
+        horizontalConstraint?.isActive = false
         let margin: CGFloat = 32
-        switch Prefs.position {
+        switch position.vertical {
         case .top: verticalConstraint = label.topAnchor.constraint(equalTo: content.topAnchor, constant: margin)
-        case .center: verticalConstraint = label.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+        case .middle: verticalConstraint = label.centerYAnchor.constraint(equalTo: content.centerYAnchor)
         case .bottom: verticalConstraint = label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -margin)
         }
+        switch position.horizontal {
+        case .left: horizontalConstraint = label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: margin)
+        case .center: horizontalConstraint = label.centerXAnchor.constraint(equalTo: content.centerXAnchor)
+        case .right: horizontalConstraint = label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -margin)
+        }
         verticalConstraint?.isActive = true
+        horizontalConstraint?.isActive = true
     }
 }
 
@@ -151,6 +212,7 @@ final class SettingsModel: ObservableObject {
     @Published var size: Double { didSet { saveFont() } }
     @Published var color: Color { didSet { Prefs.color = NSColor(color); onChange() } }
     @Published var position: Position { didSet { Prefs.position = position; onChange() } }
+    @Published var alignment: TextAlign { didSet { Prefs.alignment = alignment; onChange() } }
     @Published var shadow: Bool { didSet { Prefs.shadow = shadow; onChange() } }
     @Published private(set) var openAtLogin = SMAppService.mainApp.status == .enabled
 
@@ -162,6 +224,7 @@ final class SettingsModel: ObservableObject {
         size = Double(font.pointSize)
         color = Color(nsColor: Prefs.color)
         position = Prefs.position
+        alignment = Prefs.alignment
         shadow = Prefs.shadow
     }
 
@@ -238,8 +301,19 @@ struct SettingsView: View {
             }
 
             Section("Layout") {
-                Picker("Position", selection: $model.position) {
-                    ForEach(Position.allCases) { Text($0.title).tag($0) }
+                LabeledContent("Position") {
+                    VStack(alignment: .trailing, spacing: 6) {
+                        PositionGrid(selection: $model.position)
+                        Text(model.position.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Picker("Alignment", selection: $model.alignment) {
+                    Text("Auto").tag(TextAlign.auto)
+                    Image(systemName: "text.alignleft").tag(TextAlign.left)
+                    Image(systemName: "text.aligncenter").tag(TextAlign.center)
+                    Image(systemName: "text.alignright").tag(TextAlign.right)
                 }
                 .pickerStyle(.segmented)
                 Toggle("Text shadow", isOn: $model.shadow)
@@ -255,6 +329,39 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A small screen with a 3×3 grid of spots to place the text.
+struct PositionGrid: View {
+    @Binding var selection: Position
+
+    var body: some View {
+        Grid(horizontalSpacing: 4, verticalSpacing: 4) {
+            ForEach(Vertical.allCases, id: \.self) { vertical in
+                GridRow {
+                    ForEach(Horizontal.allCases, id: \.self) { horizontal in
+                        cell(Position(vertical, horizontal))
+                    }
+                }
+            }
+        }
+        .padding(5)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.12)))
+    }
+
+    private func cell(_ position: Position) -> some View {
+        let selected = position == selection
+        return Button {
+            selection = position
+        } label: {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(selected ? Color.accentColor : Color.secondary.opacity(0.18))
+                .frame(width: 40, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(position.title)
     }
 }
 
