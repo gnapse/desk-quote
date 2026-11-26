@@ -10,6 +10,7 @@ Desk Quote is not a widget. macOS widgets always draw their own background, and 
 
 - Fully transparent: only the text is drawn.
 - Keep several quotes and pick the one to show.
+- Rotate quotes every 15 minutes, hour or day, in order or at random.
 - Sits below all your windows, so you see it only on the bare desktop.
 - Clicks pass through it.
 - Shows on every Space.
@@ -46,6 +47,9 @@ The settings window has two tabs, and changes apply to the desktop right away.
 - Keep a list of quotes. Add with **+**, delete with **−** or ⌫, and drag to reorder.
 - Edit the selected quote in the multi-line editor.
 - The filled dot marks the quote on the desktop. Click another quote's dot to show it instead.
+- **Change quote**: never, every 15 minutes, every hour or every day. "Every day" means each new calendar day.
+- **Order**: in list order, or at random. Random always picks a different quote from the current one.
+- **Next Quote**: show the next one now. It's also in the menu bar menu (⌘N).
 
 **Appearance**
 

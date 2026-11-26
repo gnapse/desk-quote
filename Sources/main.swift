@@ -9,6 +9,35 @@ struct Quote: Codable, Identifiable, Hashable {
     var text: String
 }
 
+enum RotationInterval: String, CaseIterable, Identifiable {
+    case never, quarterHour, hour, day
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .never: return "Never"
+        case .quarterHour: return "Every 15 minutes"
+        case .hour: return "Every hour"
+        case .day: return "Every day"
+        }
+    }
+
+    /// "Every day" means each new calendar day, so you get a fresh quote in the morning.
+    func isDue(since last: Date, now: Date = Date()) -> Bool {
+        switch self {
+        case .never: return false
+        case .quarterHour: return now.timeIntervalSince(last) >= 15 * 60
+        case .hour: return now.timeIntervalSince(last) >= 60 * 60
+        case .day: return !Calendar.current.isDate(last, inSameDayAs: now)
+        }
+    }
+}
+
+enum RotationOrder: String, CaseIterable, Identifiable {
+    case sequential, random
+    var id: String { rawValue }
+}
+
 enum Vertical: String, CaseIterable { case top, middle, bottom }
 enum Horizontal: String, CaseIterable { case left, center, right }
 
@@ -87,6 +116,22 @@ enum Prefs {
     static var shownID: UUID? {
         get { defaults.string(forKey: "shownQuote").flatMap(UUID.init(uuidString:)) }
         set { defaults.set(newValue?.uuidString, forKey: "shownQuote") }
+    }
+
+    static var rotation: RotationInterval {
+        get { RotationInterval(rawValue: defaults.string(forKey: "rotation") ?? "") ?? .never }
+        set { defaults.set(newValue.rawValue, forKey: "rotation") }
+    }
+
+    static var rotationOrder: RotationOrder {
+        get { RotationOrder(rawValue: defaults.string(forKey: "rotationOrder") ?? "") ?? .sequential }
+        set { defaults.set(newValue.rawValue, forKey: "rotationOrder") }
+    }
+
+    /// When the shown quote last changed, by hand or by rotation.
+    static var lastRotation: Date {
+        get { defaults.object(forKey: "lastRotation") as? Date ?? .distantPast }
+        set { defaults.set(newValue, forKey: "lastRotation") }
     }
 
     /// The text on the desktop: the marked quote, or the first one.
@@ -234,7 +279,17 @@ final class SettingsModel: ObservableObject {
     let families: [String] = NSFontManager.shared.availableFontFamilies
 
     @Published var quotes: [Quote] { didSet { Prefs.quotes = quotes; onChange() } }
-    @Published var shownID: UUID? { didSet { Prefs.shownID = shownID; onChange() } }
+    @Published var shownID: UUID? {
+        didSet {
+            Prefs.shownID = shownID
+            Prefs.lastRotation = Date()
+            onChange()
+        }
+    }
+    @Published var rotation: RotationInterval {
+        didSet { Prefs.rotation = rotation; Prefs.lastRotation = Date() }
+    }
+    @Published var rotationOrder: RotationOrder { didSet { Prefs.rotationOrder = rotationOrder } }
     /// The quote open in the editor. Not saved, and independent of the shown one.
     @Published var selectedID: UUID?
     @Published var family: String { didSet { familyChanged() } }
@@ -254,6 +309,8 @@ final class SettingsModel: ObservableObject {
         let shown = storedQuotes.contains { $0.id == storedShown } ? storedShown : storedQuotes.first?.id
         shownID = shown
         selectedID = shown
+        rotation = Prefs.rotation
+        rotationOrder = Prefs.rotationOrder
         family = font.familyName ?? "Helvetica Neue"
         fontName = font.fontName
         size = Double(font.pointSize)
@@ -264,6 +321,34 @@ final class SettingsModel: ObservableObject {
         // Property observers don't run in init; save once so migrated data gets stable IDs.
         Prefs.quotes = quotes
         Prefs.shownID = shownID
+    }
+
+    /// Show the next quote, in list order or at random. Empty quotes are skipped.
+    func showNextQuote() {
+        let hasText = { (quote: Quote) in !quote.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let candidates = quotes.filter(hasText)
+        guard !candidates.isEmpty else { return }
+
+        switch rotationOrder {
+        case .sequential:
+            let start = quotes.firstIndex { $0.id == shownID } ?? -1
+            for step in 1...quotes.count {
+                let quote = quotes[(start + step + quotes.count) % quotes.count]
+                if hasText(quote) {
+                    shownID = quote.id
+                    return
+                }
+            }
+        case .random:
+            let others = candidates.filter { $0.id != shownID }
+            shownID = (others.randomElement() ?? candidates[0]).id
+        }
+    }
+
+    func rotateIfDue() {
+        if rotation.isDue(since: Prefs.lastRotation) {
+            showNextQuote()
+        }
     }
 
     func addQuote() {
@@ -338,6 +423,35 @@ struct QuotesTab: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
+        VStack(spacing: 0) {
+            content
+            Divider()
+            rotationBar
+        }
+    }
+
+    private var rotationBar: some View {
+        HStack(spacing: 16) {
+            Picker("Change quote", selection: $model.rotation) {
+                ForEach(RotationInterval.allCases) { Text($0.title).tag($0) }
+            }
+            .fixedSize()
+            Picker("Order", selection: $model.rotationOrder) {
+                Text("In order").tag(RotationOrder.sequential)
+                Text("Random").tag(RotationOrder.random)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .disabled(model.rotation == .never)
+            Spacer()
+            Button("Next Quote", action: model.showNextQuote)
+                .disabled(model.quotes.count < 2)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var content: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $model.selectedID) {
@@ -528,15 +642,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onChange = { [weak self] in self?.overlay.refresh() }
         installEditMenu()
 
+        // Rotation: check twice a minute, after waking from sleep, and now.
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.model.rotateIfDue()
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.model.rotateIfDue() }
+        model.rotateIfDue()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "text.quote", accessibilityDescription: "Desk Quote")
         let menu = NSMenu()
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
+        let next = NSMenuItem(title: "Next Quote", action: #selector(showNextQuote), keyEquivalent: "n")
+        next.target = self
+        menu.addItem(next)
         menu.addItem(settings)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Desk Quote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    @objc private func showNextQuote() {
+        model.showNextQuote()
     }
 
     // Opening the app again while it runs (Finder, Spotlight, `open`) shows the settings.
