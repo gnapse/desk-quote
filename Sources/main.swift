@@ -4,6 +4,11 @@ import SwiftUI
 
 // MARK: - Stored preferences
 
+struct Quote: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var text: String
+}
+
 enum Vertical: String, CaseIterable { case top, middle, bottom }
 enum Horizontal: String, CaseIterable { case left, center, right }
 
@@ -63,9 +68,31 @@ enum TextAlign: String, CaseIterable, Identifiable {
 enum Prefs {
     private static let defaults = UserDefaults.standard
 
-    static var text: String {
-        get { defaults.string(forKey: "text") ?? "Write your quote here." }
-        set { defaults.set(newValue, forKey: "text") }
+    static var quotes: [Quote] {
+        get {
+            if let data = defaults.data(forKey: "quotes"),
+               let quotes = try? JSONDecoder().decode([Quote].self, from: data) {
+                return quotes
+            }
+            // Older versions stored a single text.
+            return [Quote(text: defaults.string(forKey: "text") ?? "Write your quote here.")]
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: "quotes")
+            }
+        }
+    }
+
+    static var shownID: UUID? {
+        get { defaults.string(forKey: "shownQuote").flatMap(UUID.init(uuidString:)) }
+        set { defaults.set(newValue?.uuidString, forKey: "shownQuote") }
+    }
+
+    /// The text on the desktop: the marked quote, or the first one.
+    static var shownText: String {
+        let all = quotes
+        return (all.first { $0.id == shownID } ?? all.first)?.text ?? ""
     }
 
     static var font: NSFont {
@@ -171,7 +198,7 @@ final class Overlay {
             shadow.shadowOffset = NSSize(width: 0, height: -1)
             attributes[.shadow] = shadow
         }
-        label.attributedStringValue = NSAttributedString(string: Prefs.text, attributes: attributes)
+        label.attributedStringValue = NSAttributedString(string: Prefs.shownText, attributes: attributes)
         label.preferredMaxLayoutWidth = frame.width * 0.7
 
         verticalConstraint?.isActive = false
@@ -206,7 +233,10 @@ final class SettingsModel: ObservableObject {
 
     let families: [String] = NSFontManager.shared.availableFontFamilies
 
-    @Published var text: String { didSet { Prefs.text = text; onChange() } }
+    @Published var quotes: [Quote] { didSet { Prefs.quotes = quotes; onChange() } }
+    @Published var shownID: UUID? { didSet { Prefs.shownID = shownID; onChange() } }
+    /// The quote open in the editor. Not saved, and independent of the shown one.
+    @Published var selectedID: UUID?
     @Published var family: String { didSet { familyChanged() } }
     @Published var fontName: String { didSet { saveFont() } }
     @Published var size: Double { didSet { saveFont() } }
@@ -218,7 +248,12 @@ final class SettingsModel: ObservableObject {
 
     init() {
         let font = Prefs.font
-        text = Prefs.text
+        let storedQuotes = Prefs.quotes
+        let storedShown = Prefs.shownID
+        quotes = storedQuotes
+        let shown = storedQuotes.contains { $0.id == storedShown } ? storedShown : storedQuotes.first?.id
+        shownID = shown
+        selectedID = shown
         family = font.familyName ?? "Helvetica Neue"
         fontName = font.fontName
         size = Double(font.pointSize)
@@ -226,6 +261,35 @@ final class SettingsModel: ObservableObject {
         position = Prefs.position
         alignment = Prefs.alignment
         shadow = Prefs.shadow
+        // Property observers don't run in init; save once so migrated data gets stable IDs.
+        Prefs.quotes = quotes
+        Prefs.shownID = shownID
+    }
+
+    func addQuote() {
+        let quote = Quote(text: "")
+        quotes.append(quote)
+        if shownID == nil { shownID = quote.id }
+        selectedID = quote.id
+    }
+
+    func removeQuote(_ id: UUID) {
+        guard let index = quotes.firstIndex(where: { $0.id == id }) else { return }
+        quotes.remove(at: index)
+        let neighbor = quotes.isEmpty ? nil : quotes[min(index, quotes.count - 1)].id
+        if shownID == id { shownID = neighbor }
+        if selectedID == id { selectedID = neighbor }
+    }
+
+    func text(of id: UUID) -> Binding<String> {
+        Binding(
+            get: { self.quotes.first { $0.id == id }?.text ?? "" },
+            set: { newValue in
+                if let index = self.quotes.firstIndex(where: { $0.id == id }) {
+                    self.quotes[index].text = newValue
+                }
+            }
+        )
     }
 
     var styles: [FontStyle] {
@@ -270,18 +334,105 @@ final class SettingsModel: ObservableObject {
 
 // MARK: - Settings window
 
-struct SettingsView: View {
+struct QuotesTab: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                List(selection: $model.selectedID) {
+                    ForEach(model.quotes) { quote in
+                        row(quote).tag(quote.id)
+                    }
+                    .onMove { model.quotes.move(fromOffsets: $0, toOffset: $1) }
+                }
+                .onDeleteCommand {
+                    if let id = model.selectedID { model.removeQuote(id) }
+                }
+                Divider()
+                HStack(spacing: 0) {
+                    Button(action: model.addQuote) {
+                        Image(systemName: "plus").frame(width: 24, height: 22)
+                    }
+                    .help("Add a quote")
+                    Button {
+                        if let id = model.selectedID { model.removeQuote(id) }
+                    } label: {
+                        Image(systemName: "minus").frame(width: 24, height: 22)
+                    }
+                    .disabled(model.selectedID == nil)
+                    .help("Delete the selected quote")
+                    Spacer()
+                }
+                .buttonStyle(.borderless)
+                .padding(4)
+            }
+            .frame(width: 220)
+
+            Divider()
+
+            editor
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func row(_ quote: Quote) -> some View {
+        let shown = quote.id == model.shownID
+        let firstLine = quote.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        return HStack(spacing: 8) {
+            Button {
+                model.shownID = quote.id
+            } label: {
+                Image(systemName: shown ? "circle.fill" : "circle")
+                    .foregroundStyle(shown ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            }
+            .buttonStyle(.plain)
+            .help(shown ? "Shown on the desktop" : "Show on the desktop")
+            Text(firstLine.isEmpty ? "New quote" : firstLine)
+                .lineLimit(1)
+                .foregroundStyle(firstLine.isEmpty ? .secondary : .primary)
+        }
+        .contextMenu {
+            Button("Show on Desktop") { model.shownID = quote.id }
+            Button("Delete", role: .destructive) { model.removeQuote(quote.id) }
+        }
+    }
+
+    @ViewBuilder
+    private var editor: some View {
+        if let id = model.selectedID, model.quotes.contains(where: { $0.id == id }) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    if id == model.shownID {
+                        Label("Shown on the desktop", systemImage: "circle.fill")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Button("Show on Desktop") { model.shownID = id }
+                    }
+                    Spacer()
+                }
+                .frame(height: 24)
+                TextEditor(text: model.text(of: id))
+                    .font(.system(size: 14))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
+                    .id(id)
+            }
+            .padding(16)
+        } else {
+            Text(model.quotes.isEmpty ? "Click + to add a quote." : "Select a quote to edit it.")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct AppearanceTab: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
         Form {
-            Section("Text") {
-                TextEditor(text: $model.text)
-                    .font(.system(size: 14))
-                    .frame(minHeight: 90)
-                    .scrollContentBackground(.hidden)
-            }
-
             Section("Font") {
                 Picker("Family", selection: $model.family) {
                     ForEach(model.families, id: \.self) { Text($0).tag($0) }
@@ -327,8 +478,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -398,8 +547,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(model: model)))
-            window.title = "Desk Quote"
+            // Native settings tabs: icons in the toolbar, one page per tab.
+            let size = CGSize(width: 620, height: 520)
+            let tabs = NSTabViewController()
+            tabs.tabStyle = .toolbar
+            for (title, symbol, view) in [
+                ("Quotes", "text.quote", AnyView(QuotesTab(model: model))),
+                ("Appearance", "textformat", AnyView(AppearanceTab(model: model))),
+            ] {
+                let page = NSHostingController(rootView: view.frame(width: size.width, height: size.height))
+                page.sizingOptions = []
+                page.view.frame.size = size
+                page.preferredContentSize = size
+                page.title = title
+                let item = NSTabViewItem(viewController: page)
+                item.label = title
+                item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+                tabs.addTabViewItem(item)
+            }
+            let window = NSWindow(contentViewController: tabs)
+            window.toolbarStyle = .preference
+            window.title = "Quotes"
+            window.setContentSize(size)
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.center()

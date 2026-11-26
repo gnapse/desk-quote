@@ -9,6 +9,7 @@ Desk Quote is not a widget. macOS widgets always draw their own background, and 
 ## Features
 
 - Fully transparent: only the text is drawn.
+- Keep several quotes and pick the one to show.
 - Sits below all your windows, so you see it only on the bare desktop.
 - Clicks pass through it.
 - Shows on every Space.
@@ -38,9 +39,16 @@ The script builds `DeskQuote.app`, copies it to `~/Applications`, and opens it.
 
 Click the quote icon in the menu bar and choose **Settings…** (⌘,). Opening the app again from Spotlight or Finder also shows the settings.
 
-All options are in one window, and changes apply to the desktop right away:
+The settings window has two tabs, and changes apply to the desktop right away.
 
-- **Text**: multi-line.
+**Quotes**
+
+- Keep a list of quotes. Add with **+**, delete with **−** or ⌫, and drag to reorder.
+- Edit the selected quote in the multi-line editor.
+- The filled dot marks the quote on the desktop. Click another quote's dot to show it instead.
+
+**Appearance**
+
 - **Font**: family, style, size and color, including opacity.
 - **Layout**: nine positions in a 3×3 grid, text alignment (auto, left, center or right), and an optional text shadow. Auto alignment follows the position.
 - **General**: open at login.
